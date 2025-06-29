@@ -101,8 +101,8 @@ impl TerminalPlugin for ColorPlugin {
 
 // 终端管理器
 pub struct TerminalManager {
-    sessions: HashMap<String, TerminalSession>,
-    active_session: Option<String>,
+    pub sessions: HashMap<String, TerminalSession>,
+    pub active_session: Option<String>,
 }
 
 impl TerminalManager {

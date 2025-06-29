@@ -1,6 +1,6 @@
 // src/main.rs
 mod commands;
-use tauri_plugin_dialog::DialogExt;
+mod ai;
 
 use commands::{
     create_shell, 
@@ -10,6 +10,12 @@ use commands::{
     send_input,
     get_terminal_info,
     list_plugins
+};
+
+use ai::{
+    configure_ai,
+    chat_with_ai,
+    get_ai_config
 };
 
 pub fn run() {
@@ -23,7 +29,11 @@ pub fn run() {
             close_terminal,
             send_input,
             get_terminal_info,
-            list_plugins
+            list_plugins,
+            // AI相关命令
+            configure_ai,
+            chat_with_ai,
+            get_ai_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -30,3 +30,8 @@ uuid = { version = "1.0", features = ["v4"] }  # 新增：用于生成会话ID
 libc = "0.2"
 tauri-plugin-locale = "2.0.1"
 tauri-plugin-dialog = "2"
+# MCP和AI相关依赖
+rust-mcp-sdk = "0.1.0"
+reqwest = { version = "0.11", features = ["json"] }
+regex = "1.0"
+anyhow = "1.0"
