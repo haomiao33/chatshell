@@ -57,7 +57,7 @@ impl TerminalMCPServer {
         
         if let Some(session_id) = manager.get_active_session().cloned() {
             // 通知插件命令开始
-            if let Some(session) = manager.sessions.get_mut(&session_id) {
+            if let Some(session) = manager.get_session_mut(&session_id){
                 for plugin in &mut session.plugins {
                     plugin.on_command_start(command, &session_id);
                 }
@@ -76,7 +76,7 @@ impl TerminalMCPServer {
         let manager = TERMINAL_MANAGER.lock().unwrap();
         
         if let Some(session_id) = manager.get_active_session() {
-            if let Some(session) = manager.sessions.get(session_id) {
+            if let Some(session) = manager.get_session(session_id) {
                 Ok(session.config.working_dir.clone().unwrap_or_else(|| "Unknown".to_string()))
             } else {
                 Err("Session not found".to_string())
