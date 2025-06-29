@@ -47,6 +47,10 @@
                 <label>温度:</label>
                 <input v-model.number="aiConfig.temperature" type="number" min="0" max="2" step="0.1" />
               </div>
+              <div class="config-item">
+                <label>服务器地址:</label>
+                <input v-model="aiConfig.base_url" type="text" placeholder="输入服务器地址" />
+              </div>
               <button @click="saveAIConfig" class="save-btn">保存配置</button>
             </div>
           </div>
@@ -84,7 +88,6 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { message } from '@tauri-apps/plugin-dialog';
 import ChatPanel from './components/ChatPanel.vue';
 
 const terminalRef = ref<HTMLDivElement | null>(null);
@@ -99,15 +102,10 @@ let showConfig = ref(false);
 let aiConfig = ref({
   api_key: '',
   model: 'deepseek-chat',
+  base_url: 'https://api.deepseek.com',
   max_tokens: 1000,
   temperature: 0.7
 });
-
-const getInfo = async () => {
-  const info = await invoke("get_terminal_info");
-  console.log('info:',info);
-  await message(JSON.stringify(info), { title: 'Tauri', kind: 'error' });
-}
 
 const startResize = (e: MouseEvent) => {
   e.preventDefault();
@@ -135,6 +133,16 @@ const startResize = (e: MouseEvent) => {
 };
 
 onMounted(async () => {
+  // 加载AI配置
+  try {
+    const savedConfig = await invoke('get_ai_config');
+    if (savedConfig) {
+      aiConfig.value = { ...aiConfig.value, ...savedConfig };
+    }
+  } catch (error) {
+    console.error('Failed to load AI config:', error);
+  }
+
   if (!terminalRef.value) {
     console.error("Terminal container not found");
     return;
@@ -365,11 +373,11 @@ const saveAIConfig = async () => {
   pointer-events: auto;
 }
 
-.resize-handle:hover {
+/* .resize-handle:hover {
   background: rgba(0, 123, 255, 0.3);
-}
+} */
 
-.resize-handle::before {
+/* .resize-handle::before {
   content: '';
   position: absolute;
   left: 50%;
@@ -379,7 +387,7 @@ const saveAIConfig = async () => {
   height: 20px;
   background: #007bff;
   border-radius: 1px;
-}
+} */
 
 /* AI聊天图标样式 */
 .ai-chat-icon {

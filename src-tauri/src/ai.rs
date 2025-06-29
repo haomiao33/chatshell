@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use anyhow::Result;
 use crate::commands::TERMINAL_MANAGER;
 
@@ -16,8 +15,8 @@ impl Default for AIConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            model: "gpt-3.5-turbo".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            model: "deepseek-chat".to_string(),
+            base_url: "https://api.deepseek.com".to_string(),
             max_tokens: 1000,
             temperature: 0.7,
         }
@@ -36,6 +35,7 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     pub max_tokens: u32,
     pub temperature: f32,
+    pub stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +46,19 @@ pub struct ChatResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Choice {
     pub message: ChatMessage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorResponse {
+    pub error: ErrorDetail,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorDetail {
+    pub message: String,
+    pub r#type: String,
+    pub param: Option<String>,
+    pub code: String,
 }
 
 // MCP Server 功能 - 终端控制
@@ -158,10 +171,15 @@ impl AIAgent {
             messages,
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
+            stream: false,
         };
 
+        let url = format!("{}/chat/completions", self.config.base_url);
+        println!("[RUST] Making request to: {}", url);
+        println!("[RUST] Request body: {}", serde_json::to_string_pretty(&request).unwrap());
+
         let response = self.client
-            .post(&format!("{}/chat/completions", self.config.base_url))
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
             .json(&request)
@@ -169,16 +187,37 @@ impl AIAgent {
             .await
             .map_err(|e| format!("Request failed: {}", e))?;
 
-        let chat_response: ChatResponse = response
-            .json()
-            .await
+        let status = response.status();
+        println!("[RUST] Response status: {}", status);
+        
+        let response_text = response.text().await.map_err(|e| format!("Failed to get response text: {}", e))?;
+        println!("[RUST] Raw response: {}", response_text);
+
+        // 检查响应状态码
+        if !status.is_success() {
+            // 尝试解析错误响应
+            match serde_json::from_str::<ErrorResponse>(&response_text) {
+                Ok(error_response) => {
+                    println!("[RUST] API Error: {}", error_response.error.message);
+                    return Err(error_response.error.message);
+                }
+                Err(_) => {
+                    // 如果无法解析错误响应，返回原始响应
+                    return Err(format!("API Error ({}): {}", status, response_text));
+                }
+            }
+        }
+
+        let chat_response: ChatResponse = serde_json::from_str(&response_text)
             .map_err(|e| format!("Failed to parse response: {}", e))?;
 
         if let Some(choice) = chat_response.choices.first() {
             let content = &choice.message.content;
+            println!("[RUST] AI response content: {}", content);
             
             // 检查是否需要执行MCP命令
-            if content.contains("execute_command") {
+            if content.contains("list_files") || content.contains("get_current_directory") || content.contains("execute_command") {
+                println!("[RUST] Detected MCP command in response, handling...");
                 return self.handle_mcp_commands(content).await;
             }
             
@@ -189,19 +228,33 @@ impl AIAgent {
     }
 
     async fn handle_mcp_commands(&self, content: &str) -> Result<String, String> {
+        println!("[RUST] Handling MCP commands in content: {}", content);
+        
         // 简单的MCP命令解析
         if content.contains("list_files") {
-            TerminalMCPServer::list_files().await
+            println!("[RUST] Executing list_files command");
+            let result = TerminalMCPServer::list_files().await;
+            println!("[RUST] list_files result: {:?}", result);
+            result
         } else if content.contains("get_current_directory") {
-            TerminalMCPServer::get_current_directory().await
+            println!("[RUST] Executing get_current_directory command");
+            let result = TerminalMCPServer::get_current_directory().await;
+            println!("[RUST] get_current_directory result: {:?}", result);
+            result
         } else if content.contains("execute_command") {
+            println!("[RUST] Executing execute_command");
             // 提取命令内容
             if let Some(command) = self.extract_command(content) {
-                TerminalMCPServer::execute_command(&command).await
+                println!("[RUST] Extracted command: {}", command);
+                let result = TerminalMCPServer::execute_command(&command).await;
+                println!("[RUST] execute_command result: {:?}", result);
+                result
             } else {
+                println!("[RUST] No command found to execute");
                 Ok("No command found to execute".to_string())
             }
         } else {
+            println!("[RUST] No MCP command detected, returning original content");
             Ok(content.to_string())
         }
     }

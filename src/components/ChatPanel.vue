@@ -31,7 +31,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue';
+import { ref, nextTick } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 
 interface ChatMessage {
@@ -62,6 +62,8 @@ const sendMessage = async () => {
   const userMessage = inputMessage.value.trim();
   inputMessage.value = '';
   
+  console.log('[FRONTEND] Sending message:', userMessage);
+  
   messages.value.push({
     role: 'user',
     content: userMessage,
@@ -72,7 +74,9 @@ const sendMessage = async () => {
   isLoading.value = true;
 
   try {
+    console.log('[FRONTEND] Calling chat_with_ai command...');
     const response = await invoke<string>('chat_with_ai', { message: userMessage });
+    console.log('[FRONTEND] Received response:', response);
     
     messages.value.push({
       role: 'assistant',
@@ -80,7 +84,7 @@ const sendMessage = async () => {
       timestamp: new Date(),
     });
   } catch (error) {
-    console.error('AI chat error:', error);
+    console.error('[FRONTEND] AI chat error:', error);
     messages.value.push({
       role: 'assistant',
       content: `❌ 错误: ${error}`,
