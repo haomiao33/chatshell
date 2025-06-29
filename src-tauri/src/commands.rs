@@ -101,8 +101,8 @@ impl TerminalPlugin for ColorPlugin {
 
 // 终端管理器
 pub struct TerminalManager {
-    pub sessions: HashMap<String, TerminalSession>,
-    pub active_session: Option<String>,
+    sessions: HashMap<String, TerminalSession>,
+    active_session: Option<String>,
 }
 
 impl TerminalManager {
@@ -111,6 +111,14 @@ impl TerminalManager {
             sessions: HashMap::new(),
             active_session: None,
         }
+    }
+
+    pub fn get_session(&self, session_id: &str) -> Option<&TerminalSession> {
+        self.sessions.get(session_id)
+    }
+
+    pub fn get_session_mut(&mut self, session_id: &str) -> Option<&mut TerminalSession> {
+        self.sessions.get_mut(session_id)
     }
 
     pub fn create_session(&mut self, config: TerminalConfig, app_handle: AppHandle) -> Result<String, String> {

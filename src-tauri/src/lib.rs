@@ -9,7 +9,7 @@ use commands::{
     close_terminal, 
     send_input,
     get_terminal_info,
-    list_plugins
+    list_plugins,
 };
 
 use ai::{

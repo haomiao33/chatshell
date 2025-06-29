@@ -3,7 +3,10 @@
     <div class="header">
         <span class="header-item" @click="getInfo">获取信息</span>
     </div>
+    <div class="main-content">
     <div class="terminal-container" ref="terminalRef" style="width: 100%; height: 100%; background: black;"></div>
+      <ChatPanel />
+    </div>
   </main>
 </template>
 
@@ -15,6 +18,7 @@ import '@xterm/xterm/css/xterm.css';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { message } from '@tauri-apps/plugin-dialog';
+import ChatPanel from './components/ChatPanel.vue';
 
 const terminalRef = ref<HTMLDivElement | null>(null);
 let term: Terminal;
@@ -84,12 +88,12 @@ onMounted(async () => {
   }
 
   // 监听后端流式输出事件
-  unlisten = await listen<string>("terminal-output", event => {
+  unlisten = await listen<string>("terminal-output", (event: any) => {
     term.write(event.payload);
   });
 
   // 处理所有输入（包括键盘输入和粘贴）
-  term.onData(async (data) => {
+  term.onData(async (data: any) => {
     try {
       await invoke("send_input", { input: data });
     } catch (error) {
@@ -143,19 +147,33 @@ onBeforeUnmount(async () => {
   overflow: hidden;
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
 }
-.terminal-container{
+
+.main-content {
+  display: flex;
+  height: calc(100vh - 60px);
+}
+
+.terminal-container {
+  flex: 1;
     padding: 4px;
 }
-.header{    
+
+.header {    
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding: 10px;
+  background: #2a2a2a;
+  border-bottom: 1px solid #333;
+  height: 40px;
 }
-.header-item:hover{
+
+.header-item:hover {
     color: #007bff;
 }       
-.header-item{
+
+.header-item {
     cursor: pointer;
+  color: #fff;
 }
 </style>
