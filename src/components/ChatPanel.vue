@@ -14,7 +14,7 @@
         <input 
           v-model="config.api_key" 
           type="password" 
-          placeholder="输入你的OpenAI API Key"
+          placeholder="输入你的DeepSeek API Key"
         />
       </div>
       <div class="config-item">
