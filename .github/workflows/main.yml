@@ -1,0 +1,72 @@
+name: Tauri Build
+
+on:
+  push:
+    tags:
+      - 'v*'  # 例如 v1.0.0 会触发
+  workflow_dispatch:  # 也可以手动触发
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install dependencies
+        run: |
+          npm install
+          cargo install tauri-cli
+
+      - name: Build macOS app
+        run: |
+          npm run tauri build
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: tauri-macos
+          path: src-tauri/target/release/bundle/
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install dependencies
+        run: |
+          npm install
+          cargo install tauri-cli
+
+      - name: Build Windows app
+        run: |
+          npm run tauri build
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: tauri-windows
+          path: src-tauri/target/release/bundle/
