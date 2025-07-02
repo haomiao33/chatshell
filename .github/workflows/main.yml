@@ -26,11 +26,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install
+          npm install -g pnpm
+          pnpm install
           cargo install tauri-cli
 
       - name: Build macOS app
-        run: npm run tauri build
+        run: pnpm run tauri build
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
@@ -57,11 +58,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install
+          npm install -g pnpm
+          pnpm install
           cargo install tauri-cli
 
       - name: Build Windows app
-        run: npm run tauri build
+        run: pnpm run tauri build
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
