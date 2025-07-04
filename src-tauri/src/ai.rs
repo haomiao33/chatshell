@@ -147,6 +147,7 @@ impl AIAgent {
 1. 理解用户的自然语言请求
 2. 将其转换为合适的终端命令
 3. 执行命令并返回结果
+4. 回答的内容需要使用Markdown格式
 
 可用的MCP功能：
 - execute_command(command): 在终端中执行命令
@@ -249,7 +250,7 @@ impl AIAgent {
                 let result = TerminalMCPServer::execute_command(&command).await;
                 println!("[RUST] execute_command result: {:?}", result);
                 result
-            } else {
+                    } else {
                 println!("[RUST] No command found to execute");
                 Ok("No command found to execute".to_string())
             }
@@ -310,4 +311,4 @@ pub async fn get_ai_config() -> Result<Option<AIConfig>, String> {
     } else {
         Ok(None)
     }
-} 
+}

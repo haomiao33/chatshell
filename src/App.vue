@@ -92,7 +92,7 @@ import ChatPanel from './components/ChatPanel.vue';
 
 const terminalRef = ref<HTMLDivElement | null>(null);
 const showChatPanel = ref(true);
-const chatPanelWidth = ref(350);
+const chatPanelWidth = ref(450);
 let term: Terminal;
 let fitAddon: FitAddon;
 let unlisten: () => void;
@@ -284,7 +284,7 @@ const saveAIConfig = async () => {
 
 .terminal-container {
   flex: 1;
-  padding: 4px;
+  /* padding: 4px; */
   background: black;
   height: 100%;
   user-select: text;
