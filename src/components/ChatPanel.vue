@@ -44,16 +44,18 @@
     <!-- 输入区域 -->
     <div class="chat-input-area">
       <div class="input-container">
-        <textarea
-          v-model="inputMessage"
-          @keydown="handleKeydown"
-          @input="autoResize"
-          ref="inputRef"
-          class="chat-input"
-          placeholder="输入消息... (Ctrl+Enter 发送)"
-          rows="4"
-          :disabled="isTyping"
-        ></textarea>
+       <div class="chat-input-wrapper">
+  <textarea
+    v-model="inputMessage"
+    @keydown="handleKeydown"
+    @input="autoResize"
+    ref="inputRef"
+    class="chat-input"
+    placeholder="输入消息... (Ctrl+Enter 发送)"
+    rows="4"
+    :disabled="isTyping"
+  ></textarea>
+</div>
         <div class="input-actions">
           <div class="left-actions">
             <button 
@@ -153,17 +155,15 @@ const scrollToBottom = () => {
 
 // 键盘事件处理
 const handleKeydown = (event: KeyboardEvent) => {
+    // event.preventDefault();
   // 处于输入法拼写状态，不发送
-  if (event.isComposing) {
-    return;
-  }
-  if (event.ctrlKey && event.key === 'Enter') {
-    event.preventDefault();
-    sendMessage();
-  } else if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault();
-    sendMessage();
-  }
+//   if (event.ctrlKey && event.key === 'Enter') {
+//     event.preventDefault();
+//     sendMessage();
+//   } else if (event.key === 'Enter' && !event.shiftKey) {
+//     event.preventDefault();
+//     sendMessage();
+//   }
 };
 
 // 发送消息
@@ -237,15 +237,22 @@ onMounted(() => {
     timestamp: Date.now()
   });
 });
+
+watch(inputMessage, () => {
+  nextTick(() => {
+    inputRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+});
 </script>
 
 <style scoped>
 .chat-panel {
-  height: 100%;
+  height: 100vh;
   display: flex;
   flex-direction: column;
   background: #1a1a1a;
   color: #e0e0e0;
+  overflow: hidden; /* 防止内部溢出 */
 }
 
 .chat-messages {
@@ -253,7 +260,9 @@ onMounted(() => {
   overflow-y: auto;
   padding: 16px;
   scroll-behavior: smooth;
+  min-height: 0; /* 💥关键，防止撑出父容器 */
 }
+
 
 .message {
   margin-bottom: 20px;
@@ -318,6 +327,8 @@ onMounted(() => {
 .ai-content {
   line-height: 1.6;
 }
+
+
 
 /* Markdown 样式 */
 .markdown-content {
@@ -426,13 +437,13 @@ onMounted(() => {
   margin: 8px 0;
 }
 
-/* 输入危险 */
+
 .chat-input-area {
+  flex-shrink: 0;
   border-top: 1px solid #333;
   padding: 16px;
   background: #1a1a1a;
 }
-
 .input-container {
   display: flex;
   gap: 8px;
@@ -441,26 +452,29 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
 }
+.chat-input-wrapper {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #444;
+  background: #2a2a2a;
+   width: 100%;
+}
 
 .chat-input {
-  flex: 1;
-  background: #2a2a2a;
-  border: 1px solid #444;
-  border-radius: 8px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: #e0e0e0;
   resize: none;
-  font-family: inherit;
   font-size: 14px;
-  line-height: 1.4;
-  min-height: 20px;
-  max-height: 120px;
-  transition: border-color 0.2s ease;
+  padding: 12px 14px;
   width: 100%;
-  /* 内容自适应 */
-  max-width: 100%;
+  max-height: 120px;
+  overflow-y: auto;
   box-sizing: border-box;
-  padding: 10px;
-  margin: 0;
+  font-family: inherit;
+  line-height: 1.6;
+ 
 }
 
 .chat-input:focus {
@@ -473,12 +487,24 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
+.chat-input::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-input::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 3px;
+}
+
+
+/* actions */
 .input-actions {
   display: flex;
   width: 100%;
   gap: 4px;
   align-items: center;
   margin-bottom: 10px;
+  justify-content: space-between;
 }
 
 .action-btn {

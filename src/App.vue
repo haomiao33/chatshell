@@ -82,7 +82,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue';
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -97,7 +97,7 @@ let term: Terminal;
 let fitAddon: FitAddon;
 let unlisten: () => void;
 let sessionId: string | null = null;
-let isResizing = false;
+const isResizing = ref(false);
 let showConfig = ref(false);
 let aiConfig = ref({
   api_key: '',
@@ -106,31 +106,31 @@ let aiConfig = ref({
   max_tokens: 1000,
   temperature: 0.7
 });
-
 const startResize = (e: MouseEvent) => {
   e.preventDefault();
-  isResizing = true;
-  
+  isResizing.value = true;
+
   const startX = e.clientX;
   const startWidth = chatPanelWidth.value;
-  
+
   const handleMouseMove = (e: MouseEvent) => {
-    if (!isResizing) return;
-    
+    if (!isResizing.value) return;
+
     const deltaX = startX - e.clientX;
     const newWidth = Math.max(250, Math.min(600, startWidth + deltaX));
     chatPanelWidth.value = newWidth;
   };
-  
+
   const handleMouseUp = () => {
-    isResizing = false;
+    isResizing.value = false;
     document.removeEventListener('mousemove', handleMouseMove);
     document.removeEventListener('mouseup', handleMouseUp);
   };
-  
+
   document.addEventListener('mousemove', handleMouseMove);
   document.addEventListener('mouseup', handleMouseUp);
 };
+
 
 onMounted(async () => {
   // 加载AI配置
@@ -256,6 +256,14 @@ const saveAIConfig = async () => {
     console.error('保存AI配置失败:', error);
   }
 };
+
+watch(chatPanelWidth, (newWidth) => {
+  localStorage.setItem('chatPanelWidth', newWidth.toString());
+});
+onMounted(() => {
+  const saved = localStorage.getItem('chatPanelWidth');
+  if (saved) chatPanelWidth.value = parseInt(saved);
+});
 </script>
 
 <style scoped>
@@ -377,18 +385,21 @@ const saveAIConfig = async () => {
   background: rgba(0, 123, 255, 0.3);
 } */
 
-/* .resize-handle::before {
-  content: '';
+.resize-handle::before {
+  content: '⋮';
+  color: #888;
+  font-size: 20px;
   position: absolute;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 2px;
-  height: 20px;
-  background: #007bff;
-  border-radius: 1px;
-} */
-
+}
+.resize-handle:active {
+  background-color: rgba(255, 255, 255, 0.1);
+}   
+.resize-handle {
+  width: 10px;
+}
 /* AI聊天图标样式 */
 .ai-chat-icon {
   position: fixed;
@@ -551,4 +562,6 @@ const saveAIConfig = async () => {
   background: #444;
   color: #fff;
 }
+
+
 </style> 
