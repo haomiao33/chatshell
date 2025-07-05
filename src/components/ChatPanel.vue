@@ -123,8 +123,8 @@ marked.setOptions({
 
 // 渲染 Markdown
 const renderMarkdown = (content: string): string => {
-  const html = marked.parse(content);
-  return html;
+  console.log(content)
+  return marked.parse(content);
 };
 
 // 格式化时间
@@ -331,7 +331,7 @@ watch(inputMessage, () => {
 
 
 /* Markdown 样式 */
-.markdown-content {
+ .markdown-content {
   color: #e0e0e0;
 }
 
@@ -435,7 +435,7 @@ watch(inputMessage, () => {
   height: auto;
   border-radius: 8px;
   margin: 8px 0;
-}
+} 
 
 
 .chat-input-area {
