@@ -205,7 +205,8 @@ const config = ref({
   max_tokens: 1000,
   temperature: 0.7,
   stream: true,
-  mcp_enabled: true
+  mcp_enabled: true,
+  
 })
 
 // 快捷命令
@@ -381,10 +382,34 @@ const sendMessage = async () => {
     isStreaming.value = true
 
     if (config.value.stream) {
+      await getAvailableTools()
+      //tools.value.length
+      let system_prompt= `
+    你是一个智能终端助手，可以帮助用户执行终端命令。你可以：
+
+1. 理解用户的自然语言请求
+2. 将其转换为合适的终端命令
+3. 执行命令并返回结果
+4. 回答的内容需要使用Markdown格式
+
+请根据用户的需求，选择合适的命令执行。如果用户只是想查看信息，直接回答；如果需要执行命令，使用相应的MCP功能,
+可用的MCP功能：
+
+   `
+   system_prompt+=tools.value.map((tool) => `
+  - name:${tool.name}, description:${tool.description}, input_schema:${tool.input_schema}
+  `).join('\n');
+
+
       // 使用流式 HTTP 请求
       const requestBody = new TextEncoder().encode(JSON.stringify({
         model: config.value.model,
-        messages: [{ role: 'user', content: message }],
+        messages: [{
+           role: 'user', content: message 
+          },{
+            role: 'system', content: system_prompt
+          }
+        ],
         temperature: config.value.temperature,
         max_tokens: config.value.max_tokens,
         stream: true
