@@ -1,314 +1,623 @@
+use std::time::Duration;
+use std::error::Error;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
+use std::fs;
+use std::io::{Read, Write};
+use futures_util::StreamExt;
+use reqwest::Client;
+use reqwest::header::{HeaderName, HeaderMap};
 use serde::{Deserialize, Serialize};
-use anyhow::Result;
-use crate::commands::TERMINAL_MANAGER;
+use serde_json::{Value, json};
+use tauri::Window;
+use tauri::Emitter;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AIConfig {
-    pub api_key: String,
-    pub model: String,
-    pub base_url: String,
-    pub max_tokens: u32,
-    pub temperature: f32,
+static REQUEST_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+// HTTP Stream Client
+#[derive(Debug, Clone)]
+pub struct HttpStreamClient {
+    client: Client,
+    window: Window,
 }
 
-impl Default for AIConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-            model: "deepseek-chat".to_string(),
-            base_url: "https://api.deepseek.com".to_string(),
-            max_tokens: 1000,
-            temperature: 0.7,
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamResponse {
+    pub request_id: u32,
+    pub status: u16,
+    pub status_text: String,
+    pub headers: HashMap<String, String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct ChunkPayload {
+    pub request_id: u32,
+    pub chunk: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct EndPayload {
+    pub request_id: u32,
+    pub status: u16,
+}
+
+impl HttpStreamClient {
+    pub fn new(window: Window) -> Result<Self, Box<dyn Error>> {
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .connect_timeout(Duration::new(3, 0))
+            .build()?;
+
+        Ok(Self { client, window })
+    }
+
+    pub async fn stream_fetch(
+        &self,
+        method: String,
+        url: String,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    ) -> Result<StreamResponse, String> {
+        let event_name = "stream-response";
+        let request_id = REQUEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let mut header_map = HeaderMap::new();
+        for (key, value) in &headers {
+            header_map.insert(
+                key.parse::<HeaderName>().map_err(|e| format!("Invalid header name: {}", e))?,
+                value.parse().map_err(|e| format!("Invalid header value: {}", e))?,
+            );
         }
+
+        let method = method.parse::<reqwest::Method>()
+            .map_err(|e| format!("Invalid HTTP method: {}", e))?;
+
+        let mut request = self.client.request(method.clone(), &url)
+            .headers(header_map);
+
+        if matches!(method, reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH) {
+            request = request.body(body);
+        }
+
+        match request.send().await {
+            Ok(response) => {
+                let mut headers = HashMap::new();
+                for (name, value) in response.headers() {
+                    headers.insert(
+                        name.as_str().to_string(),
+                        String::from_utf8_lossy(value.as_bytes()).to_string(),
+                    );
+                }
+        
+                let status = response.status().as_u16();
+        
+                println!("[stream_fetch] 请求成功: {} {}", status, url);
+                println!("[stream_fetch] 响应头: {:?}", headers);
+        
+                let window = self.window.clone();
+        
+                tauri::async_runtime::spawn(async move {
+                    let mut stream = response.bytes_stream();
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(bytes) => {
+                                println!("[stream_fetch] 收到 chunk: {:?}", bytes);
+                                match String::from_utf8(bytes.to_vec()) {
+                                    Ok(chunk_str) => {
+                                        println!("[stream_fetch] chunk 转为字符串: {}", chunk_str);
+                                        if let Err(e) = window.emit(event_name, ChunkPayload { request_id, chunk: chunk_str }) {
+                                            eprintln!("[stream_fetch] emit chunk 失败: {}", e);
+                                        }else{
+                                            println!("[stream_fetch] emit chunk 成功");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[stream_fetch] UTF-8 解码失败: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("[stream_fetch] stream error: {}", e),
+                        }
+                    }
+        
+                    if let Err(e) = window.emit(event_name, EndPayload { request_id, status }) {
+                        eprintln!("[stream_fetch] emit end 失败: {}", e);
+                    }
+                });
+        
+                Ok(StreamResponse {
+                    request_id,
+                    status,
+                    status_text: "OK".to_string(),
+                    headers,
+                })
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                println!("[stream_fetch] 请求失败: {}", error_msg);
+        
+                let window = self.window.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = window.emit(event_name, ChunkPayload { 
+                        request_id, 
+                        chunk: format!("[stream_fetch error] {}", error_msg),
+                    }) {
+                        eprintln!("[stream_fetch] emit 错误 chunk 失败: {}", e);
+                    }
+                    if let Err(e) = window.emit(event_name, EndPayload { request_id, status: 0 }) {
+                        eprintln!("[stream_fetch] emit 错误 end 失败: {}", e);
+                    }
+                });
+        
+                Ok(StreamResponse {
+                    request_id,
+                    status: 599,
+                    status_text: "Error".to_string(),
+                    headers: HashMap::new(),
+                })
+            }
+        }
+        
+           
     }
 }
 
+// MCP Tool definitions
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
+pub struct McpTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<ChatMessage>,
-    pub max_tokens: u32,
-    pub temperature: f32,
-    pub stream: bool,
+pub struct McpToolResult {
+    pub content: Vec<McpContent>,
+    pub is_error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatResponse {
-    pub choices: Vec<Choice>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Choice {
-    pub message: ChatMessage,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorResponse {
-    pub error: ErrorDetail,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorDetail {
-    pub message: String,
+pub struct McpContent {
     pub r#type: String,
-    pub param: Option<String>,
-    pub code: String,
+    pub text: String,
 }
 
-// MCP Server 功能 - 终端控制
-pub struct TerminalMCPServer;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolCall {
+    pub name: String,
+    pub arguments: HashMap<String, Value>,
+}
 
-impl TerminalMCPServer {
-    pub async fn execute_command(command: &str) -> Result<String, String> {
-        let mut manager = TERMINAL_MANAGER.lock().unwrap();
-        
-        if let Some(session_id) = manager.get_active_session().cloned() {
-            // 通知插件命令开始
-            if let Some(session) = manager.get_session_mut(&session_id){
-                for plugin in &mut session.plugins {
-                    plugin.on_command_start(command, &session_id);
+// File System Tools
+pub struct FileSystemTools;
+
+impl FileSystemTools {
+    pub fn get_tools() -> Vec<McpTool> {
+        vec![
+            McpTool {
+                name: "execute_command".to_string(),
+                description: "Execute a shell command and return the output".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute"
+                        },
+                        "working_directory": {
+                            "type": "string",
+                            "description": "Working directory for the command (optional)"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            McpTool {
+                name: "get_current_directory".to_string(),
+                description: "Get the current working directory".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "read_file".to_string(),
+                description: "Read contents of a file".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the file to read"
+                        }
+                    },
+                    "required": ["file_path"]
+                }),
+            },
+            McpTool {
+                name: "write_file".to_string(),
+                description: "Write content to a file".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the file to write"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to write to the file"
+                        },
+                        "create_directories": {
+                            "type": "boolean",
+                            "description": "Create parent directories if they don't exist"
+                        }
+                    },
+                    "required": ["file_path", "content"]
+                }),
+            },
+            McpTool {
+                name: "delete_file".to_string(),
+                description: "Delete a file".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the file to delete"
+                        }
+                    },
+                    "required": ["file_path"]
+                }),
+            },
+            McpTool {
+                name: "list_directory".to_string(),
+                description: "List contents of a directory".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "directory_path": {
+                            "type": "string",
+                            "description": "Path to the directory to list"
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "description": "List recursively"
+                        }
+                    },
+                    "required": ["directory_path"]
+                }),
+            },
+        ]
+    }
+
+    pub fn execute_tool(tool_call: &McpToolCall) -> McpToolResult {
+        match tool_call.name.as_str() {
+            "execute_command" => Self::execute_command(tool_call),
+            "get_current_directory" => Self::get_current_directory(),
+            "read_file" => Self::read_file(tool_call),
+            "write_file" => Self::write_file(tool_call),
+            "delete_file" => Self::delete_file(tool_call),
+            "list_directory" => Self::list_directory(tool_call),
+            _ => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: format!("Unknown tool: {}", tool_call.name),
+                }],
+                is_error: true,
+            },
+        }
+    }
+
+    fn execute_command(tool_call: &McpToolCall) -> McpToolResult {
+        let command = tool_call.arguments.get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let working_dir = tool_call.arguments.get("working_directory")
+            .and_then(|v| v.as_str());
+
+        let mut cmd = if cfg!(target_os = "windows") {
+            let mut c = Command::new("cmd");
+            c.args(&["/C", command]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(&["-c", command]);
+            c
+        };
+
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
+        }
+
+        match cmd.output() {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let success = output.status.success();
+
+                let text = if success {
+                    stdout.to_string()
+                } else {
+                    format!("Command failed with exit code: {:?}\nStdout: {}\nStderr: {}", 
+                           output.status.code(), stdout, stderr)
+                };
+
+                McpToolResult {
+                    content: vec![McpContent {
+                        r#type: "text".to_string(),
+                        text,
+                    }],
+                    is_error: !success,
                 }
             }
-            
-            let command_with_newline = format!("{}\n", command);
-            manager.write_to_session(&session_id, &command_with_newline)?;
-            
-            Ok(format!("Command '{}' sent to terminal", command))
-        } else {
-            Err("No active terminal session".to_string())
+            Err(e) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: format!("Failed to execute command: {}", e),
+                }],
+                is_error: true,
+            },
         }
     }
 
-    pub async fn get_current_directory() -> Result<String, String> {
-        let manager = TERMINAL_MANAGER.lock().unwrap();
-        
-        if let Some(session_id) = manager.get_active_session() {
-            if let Some(session) = manager.get_session(session_id) {
-                Ok(session.config.working_dir.clone().unwrap_or_else(|| "Unknown".to_string()))
+    fn get_current_directory() -> McpToolResult {
+        match std::env::current_dir() {
+            Ok(dir) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: dir.to_string_lossy().to_string(),
+                }],
+                is_error: false,
+            },
+            Err(e) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: format!("Failed to get current directory: {}", e),
+                }],
+                is_error: true,
+            },
+        }
+    }
+
+    fn read_file(tool_call: &McpToolCall) -> McpToolResult {
+        let file_path = tool_call.arguments.get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        match fs::read_to_string(file_path) {
+            Ok(content) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: content,
+                }],
+                is_error: false,
+            },
+            Err(e) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: format!("Failed to read file {}: {}", file_path, e),
+                }],
+                is_error: true,
+            },
+        }
+    }
+
+    fn write_file(tool_call: &McpToolCall) -> McpToolResult {
+        let file_path = tool_call.arguments.get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let content = tool_call.arguments.get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let create_directories = tool_call.arguments.get("create_directories")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if create_directories {
+            if let Some(parent) = Path::new(file_path).parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    return McpToolResult {
+                        content: vec![McpContent {
+                            r#type: "text".to_string(),
+                            text: format!("Failed to create directories: {}", e),
+                        }],
+                        is_error: true,
+                    };
+                }
+            }
+        }
+
+        match fs::write(file_path, content) {
+            Ok(_) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: format!("Successfully wrote to file: {}", file_path),
+                }],
+                is_error: false,
+            },
+            Err(e) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: format!("Failed to write file {}: {}", file_path, e),
+                }],
+                is_error: true,
+            },
+        }
+    }
+
+    fn delete_file(tool_call: &McpToolCall) -> McpToolResult {
+        let file_path = tool_call.arguments.get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        match fs::remove_file(file_path) {
+            Ok(_) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: format!("Successfully deleted file: {}", file_path),
+                }],
+                is_error: false,
+            },
+            Err(e) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: format!("Failed to delete file {}: {}", file_path, e),
+                }],
+                is_error: true,
+            },
+        }
+    }
+
+    fn list_directory(tool_call: &McpToolCall) -> McpToolResult {
+        let directory_path = tool_call.arguments.get("directory_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+
+        let recursive = tool_call.arguments.get("recursive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        match Self::list_dir_recursive(directory_path, recursive) {
+            Ok(entries) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: entries.join("\n"),
+                }],
+                is_error: false,
+            },
+            Err(e) => McpToolResult {
+                content: vec![McpContent {
+                    r#type: "text".to_string(),
+                    text: format!("Failed to list directory {}: {}", directory_path, e),
+                }],
+                is_error: true,
+            },
+        }
+    }
+
+    fn list_dir_recursive(dir_path: &str, recursive: bool) -> Result<Vec<String>, Box<dyn Error>> {
+        let mut entries = Vec::new();
+        let dir = fs::read_dir(dir_path)?;
+
+        for entry in dir {
+            let entry = entry?;
+            let path = entry.path();
+            let path_str = path.to_string_lossy().to_string();
+
+            if path.is_dir() {
+                entries.push(format!("{}/", path_str));
+                if recursive {
+                    match Self::list_dir_recursive(&path_str, true) {
+                        Ok(sub_entries) => entries.extend(sub_entries),
+                        Err(_) => {} // Skip directories we can't read
+                    }
+                }
             } else {
-                Err("Session not found".to_string())
+                entries.push(path_str);
             }
-        } else {
-            Err("No active terminal session".to_string())
+        }
+
+        Ok(entries)
+    }
+}
+
+// MCP Server
+pub struct McpServer {
+    tools: Vec<McpTool>,
+}
+
+impl McpServer {
+    pub fn new() -> Self {
+        Self {
+            tools: FileSystemTools::get_tools(),
         }
     }
 
-    pub async fn list_files() -> Result<String, String> {
-        let current_dir = Self::get_current_directory().await?;
-        
-        match std::fs::read_dir(&current_dir) {
-            Ok(entries) => {
-                let files: Vec<String> = entries
-                    .filter_map(|entry| entry.ok())
-                    .map(|entry| {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                            format!("📁 {}", name)
-                        } else {
-                            format!("📄 {}", name)
-                        }
-                    })
-                    .collect();
-                Ok(format!("Files in {}:\n{}", current_dir, files.join("\n")))
-            }
-            Err(e) => Err(format!("Failed to read directory: {}", e))
-        }
+    pub fn get_tools(&self) -> &[McpTool] {
+        &self.tools
+    }
+
+    pub fn execute_tool(&self, tool_call: &McpToolCall) -> McpToolResult {
+        FileSystemTools::execute_tool(tool_call)
     }
 }
 
 // AI Agent
-pub struct AIAgent {
-    config: AIConfig,
-    client: reqwest::Client,
+pub struct AiAgent {
+    mcp_server: McpServer,
+    http_client: Option<HttpStreamClient>,
 }
 
-impl AIAgent {
-    pub fn new(config: AIConfig) -> Self {
-        Self {
-            config,
-            client: reqwest::Client::new(),
-        }
-    }
-
-    pub async fn chat(&self, user_message: &str) -> Result<String, String> {
-        if self.config.api_key.is_empty() {
-            return Err("API key not configured".to_string());
-        }
-
-        // 构建系统提示词，包含MCP功能说明
-        let system_prompt = r#"你是一个智能终端助手，可以帮助用户执行终端命令。你可以：
-
-1. 理解用户的自然语言请求
-2. 将其转换为合适的终端命令
-3. 执行命令并返回结果
-4. 回答的内容需要使用Markdown格式
-
-可用的MCP功能：
-- execute_command(command): 在终端中执行命令
-- get_current_directory(): 获取当前工作目录
-- list_files(): 列出当前目录的文件
-
-请根据用户的需求，选择合适的命令执行。如果用户只是想查看信息，直接回答；如果需要执行命令，使用相应的MCP功能。"#;
-
-        let messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt.to_string(),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: user_message.to_string(),
-            },
-        ];
-
-        let request = ChatRequest {
-            model: self.config.model.clone(),
-            messages,
-            max_tokens: self.config.max_tokens,
-            temperature: self.config.temperature,
-            stream: false,
+impl AiAgent {
+    pub fn new(window: Option<Window>) -> Result<Self, Box<dyn Error>> {
+        let http_client = if let Some(w) = window {
+            Some(HttpStreamClient::new(w)?)
+        } else {
+            None
         };
 
-        let url = format!("{}/chat/completions", self.config.base_url);
-        println!("[RUST] Making request to: {}", url);
-        println!("[RUST] Request body: {}", serde_json::to_string_pretty(&request).unwrap());
-
-        let response = self.client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {}", e))?;
-
-        let status = response.status();
-        println!("[RUST] Response status: {}", status);
-        
-        let response_text = response.text().await.map_err(|e| format!("Failed to get response text: {}", e))?;
-        println!("[RUST] Raw response: {}", response_text);
-
-        // 检查响应状态码
-        if !status.is_success() {
-            // 尝试解析错误响应
-            match serde_json::from_str::<ErrorResponse>(&response_text) {
-                Ok(error_response) => {
-                    println!("[RUST] API Error: {}", error_response.error.message);
-                    return Err(error_response.error.message);
-                }
-                Err(_) => {
-                    // 如果无法解析错误响应，返回原始响应
-                    return Err(format!("API Error ({}): {}", status, response_text));
-                }
-            }
-        }
-
-        let chat_response: ChatResponse = serde_json::from_str(&response_text)
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-        if let Some(choice) = chat_response.choices.first() {
-            let content = &choice.message.content;
-            println!("[RUST] AI response content: {}", content);
-            
-            // 检查是否需要执行MCP命令
-            if content.contains("list_files") || content.contains("get_current_directory") || content.contains("execute_command") {
-                println!("[RUST] Detected MCP command in response, handling...");
-                return self.handle_mcp_commands(content).await;
-            }
-            
-            Ok(content.clone())
-        } else {
-            Err("No response from AI".to_string())
-        }
+        Ok(Self {
+            mcp_server: McpServer::new(),
+            http_client,
+        })
     }
 
-    async fn handle_mcp_commands(&self, content: &str) -> Result<String, String> {
-        println!("[RUST] Handling MCP commands in content: {}", content);
-        
-        // 简单的MCP命令解析
-        if content.contains("list_files") {
-            println!("[RUST] Executing list_files command");
-            let result = TerminalMCPServer::list_files().await;
-            println!("[RUST] list_files result: {:?}", result);
-            result
-        } else if content.contains("get_current_directory") {
-            println!("[RUST] Executing get_current_directory command");
-            let result = TerminalMCPServer::get_current_directory().await;
-            println!("[RUST] get_current_directory result: {:?}", result);
-            result
-        } else if content.contains("execute_command") {
-            println!("[RUST] Executing execute_command");
-            // 提取命令内容
-            if let Some(command) = self.extract_command(content) {
-                println!("[RUST] Extracted command: {}", command);
-                let result = TerminalMCPServer::execute_command(&command).await;
-                println!("[RUST] execute_command result: {:?}", result);
-                result
-                    } else {
-                println!("[RUST] No command found to execute");
-                Ok("No command found to execute".to_string())
-            }
-        } else {
-            println!("[RUST] No MCP command detected, returning original content");
-            Ok(content.to_string())
-        }
+    pub fn get_available_tools(&self) -> &[McpTool] {
+        self.mcp_server.get_tools()
     }
 
-    fn extract_command(&self, content: &str) -> Option<String> {
-        // 简单的命令提取逻辑
-        if let Some(start) = content.find("execute_command(") {
-            if let Some(end) = content[start..].find(')') {
-                let command_content = &content[start + 16..start + end];
-                // 移除引号
-                let command = command_content.trim_matches('"').trim_matches('\'');
-                return Some(command.to_string());
-            }
+    pub fn execute_tool(&self, tool_call: &McpToolCall) -> McpToolResult {
+        self.mcp_server.execute_tool(tool_call)
+    }
+
+    pub async fn stream_http_request(
+        &self,
+        method: String,
+        url: String,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    ) -> Result<StreamResponse, String> {
+        match &self.http_client {
+            Some(client) => client.stream_fetch(method, url, headers, body).await,
+            None => Err("HTTP client not initialized".to_string()),
         }
-        None
     }
 }
 
-// 全局AI Agent实例
-use once_cell::sync::Lazy;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
-pub static AI_AGENT: Lazy<Arc<Mutex<Option<AIAgent>>>> = 
-    Lazy::new(|| Arc::new(Mutex::new(None)));
-
-// Tauri 命令
+// Tauri command exports
 #[tauri::command]
-pub async fn configure_ai(config: AIConfig) -> Result<(), String> {
-    let agent = AIAgent::new(config);
-    let mut global_agent = AI_AGENT.lock().await;
-    *global_agent = Some(agent);
-    Ok(())
+pub async fn stream_fetch(
+    window: Window,
+    method: String,
+    url: String,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+) -> Result<StreamResponse, String> {
+    let client = HttpStreamClient::new(window).map_err(|e| e.to_string())?;
+    client.stream_fetch(method, url, headers, body).await
 }
 
 #[tauri::command]
-pub async fn chat_with_ai(message: String) -> Result<String, String> {
-    let agent_guard = AI_AGENT.lock().await;
-    
-    if let Some(agent) = &*agent_guard {
-        agent.chat(&message).await
-    } else {
-        Err("AI Agent not configured. Please configure API key first.".to_string())
-    }
+pub fn get_ai_tools() -> Vec<McpTool> {
+    FileSystemTools::get_tools()
 }
 
 #[tauri::command]
-pub async fn get_ai_config() -> Result<Option<AIConfig>, String> {
-    let agent_guard = AI_AGENT.lock().await;
-    
-    if let Some(agent) = &*agent_guard {
-        Ok(Some(agent.config.clone()))
-    } else {
-        Ok(None)
+pub fn execute_ai_tool(tool_call: McpToolCall) -> McpToolResult {
+    FileSystemTools::execute_tool(&tool_call)
+}
+
+#[tauri::command]
+pub fn create_ai_agent() -> Result<String, String> {
+    match AiAgent::new(None) {
+        Ok(_) => Ok("AI Agent created successfully".to_string()),
+        Err(e) => Err(e.to_string()),
     }
 }

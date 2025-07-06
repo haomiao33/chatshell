@@ -13,9 +13,10 @@ use commands::{
 };
 
 use ai::{
-    configure_ai,
-    chat_with_ai,
-    get_ai_config
+    stream_fetch,
+    get_ai_tools,
+    execute_ai_tool,
+    create_ai_agent
 };
 
 pub fn run() {
@@ -31,9 +32,10 @@ pub fn run() {
             get_terminal_info,
             list_plugins,
             // AI相关命令
-            configure_ai,
-            chat_with_ai,
-            get_ai_config
+            stream_fetch,
+            get_ai_tools,
+            execute_ai_tool,
+            create_ai_agent
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

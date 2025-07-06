@@ -31,6 +31,9 @@
     "@vitejs/plugin-vue-jsx": "^5.0.0",
     "@vue/runtime-core": "^3.5.17",
     "@vue/runtime-dom": "^3.5.17",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
     "typescript": "~5.6.2",
     "vite": "^6.0.3",
     "vue-tsc": "^2.2.10"
