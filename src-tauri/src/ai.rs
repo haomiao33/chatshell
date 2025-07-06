@@ -1,13 +1,17 @@
+use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities};
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use crate::commands::TERMINAL_MANAGER;
-use std::process::Command;
+use std::borrow::Cow;
 use std::time::Duration;
 use tokio::time::timeout;
 use tokio::process::Command as TokioCommand;
-use rmcp::{ServerHandler, model::ServerInfo, schemars, tool};
+use rmcp::{ServerHandler, model::ServerInfo, schemars};
 use std::fs;
 use std::path::Path;
+use futures_util::StreamExt;
+use tokio::sync::mpsc;
+use tauri::{Emitter, EventTarget};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AIConfig {
@@ -52,8 +56,11 @@ pub struct ChatResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Choice {
-    pub message: ChatMessage,
+    pub message: Option<ChatMessage>,
+    pub delta: Option<ChatMessage>,
+    pub finish_reason: Option<String>,
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
@@ -66,78 +73,6 @@ pub struct ErrorDetail {
     pub r#type: String,
     pub param: Option<String>,
     pub code: String,
-}
-
-// 系统信息检测
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemInfo {
-    pub os: String,
-    pub arch: String,
-    pub platform: String,
-    pub shell: String,
-    pub current_dir: String,
-    pub user: String,
-    pub hostname: String,
-}
-
-impl SystemInfo {
-    pub fn detect() -> Self {
-        let os = std::env::consts::OS.to_string();
-        let arch = std::env::consts::ARCH.to_string();
-        let platform = format!("{}-{}", os, arch);
-        
-        // 检测默认shell
-        let shell = match os.as_str() {
-            "windows" => "cmd".to_string(),
-            "macos" | "linux" => {
-                std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-            }
-            _ => "sh".to_string(),
-        };
-        
-        let current_dir = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string();
-        
-        let user = std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "unknown".to_string());
-        
-        let hostname = std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("COMPUTERNAME"))
-            .unwrap_or_else(|_| "localhost".to_string());
-        
-        Self {
-            os,
-            arch,
-            platform,
-            shell,
-            current_dir,
-            user,
-            hostname,
-        }
-    }
-    
-    pub fn to_prompt_context(&self) -> String {
-        format!(
-            r#"当前系统信息：
-- 操作系统：{} ({})
-- 架构：{}
-- 默认Shell：{}
-- 当前目录：{}
-- 用户：{}
-- 主机名：{}
-
-命令执行规范：
-- Windows系统使用 cmd.exe 或 PowerShell 命令
-- macOS/Linux系统使用 bash/zsh/sh 命令
-- 文件路径使用对应系统的路径分隔符
-- 权限相关命令请提醒用户可能需要管理员权限"#,
-            self.os, self.platform, self.arch, self.shell, 
-            self.current_dir, self.user, self.hostname
-        )
-    }
 }
 
 // 命令执行类型
@@ -189,25 +124,39 @@ pub struct FindFilesRequest {
     #[schemars(description = "是否递归搜索子目录")]
     pub recursive: Option<bool>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeltaMessage {
+    pub content: Option<String>,
+    // role 字段是可选的（首次 delta 中可能有）
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamChoice {
+    pub delta: Option<DeltaMessage>,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamChunk {
+    pub choices: Vec<StreamChoice>,
+}
+
 
 // 增强的 MCP Server
 #[derive(Debug, Clone)]
-pub struct EnhancedTerminalMCPServer {
-    pub system_info: SystemInfo,
-}
+pub struct EnhancedTerminalMCPServer;
 
 impl EnhancedTerminalMCPServer {
     pub fn new() -> Self {
-        Self {
-            system_info: SystemInfo::detect(),
-        }
+        Self
     }
 }
 
-#[tool(tool_box)]
+// #[tool(tool_box)]
 impl EnhancedTerminalMCPServer {
-    #[tool(description = "在终端中执行命令。支持两种模式：terminal（持久终端会话）和 process（新进程执行）")]
-    async fn execute_command(&self, #[tool(aggr)] req: ExecuteCommandRequest) -> Result<String, String> {
+    // #[tool(description = "在终端中执行命令。支持两种模式：terminal（持久终端会话）和 process（新进程执行）")]
+    async fn execute_command(&self,  req: ExecuteCommandRequest) -> Result<String, String> {
         let execution_type = match req.execution_type.as_deref() {
             Some("terminal") => ExecutionType::Terminal,
             Some("process") => ExecutionType::Process,
@@ -225,30 +174,38 @@ impl EnhancedTerminalMCPServer {
         }
     }
     
-    #[tool(description = "读取文件内容")]
-    async fn read_file(&self, #[tool(aggr)] req: ReadFileRequest) -> Result<String, String> {
+    // #[tool(description = "读取文件内容")]
+    async fn read_file(&self, req: ReadFileRequest) -> Result<String, String> {
         match fs::read_to_string(&req.path) {
             Ok(content) => Ok(format!("文件内容 ({}):\n{}", req.path, content)),
             Err(e) => Err(format!("读取文件失败: {}", e)),
         }
     }
     
-    #[tool(description = "写入文件内容")]
-    async fn write_file(&self, #[tool(aggr)] req: WriteFileRequest) -> Result<String, String> {
+    // #[tool(description = "写入文件内容")]
+    async fn write_file(&self, req: WriteFileRequest) -> Result<String, String> {
         let result = if req.append.unwrap_or(false) {
-            fs::write(&req.path, &req.content)
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&req.path)
+                .map_err(|e| format!("打开文件失败: {}", e))?;
+            file.write_all(req.content.as_bytes())
+                .map_err(|e| format!("写入文件失败: {}", e))
         } else {
             fs::write(&req.path, &req.content)
+                .map_err(|e| format!("写入文件失败: {}", e))
         };
         
         match result {
             Ok(_) => Ok(format!("文件写入成功: {}", req.path)),
-            Err(e) => Err(format!("写入文件失败: {}", e)),
+            Err(e) => Err(e),
         }
     }
     
-    #[tool(description = "查找文件")]
-    async fn find_files(&self, #[tool(aggr)] req: FindFilesRequest) -> Result<String, String> {
+    // #[tool(description = "查找文件")]
+    async fn find_files(&self,  req: FindFilesRequest) -> Result<String, String> {
         let dir = Path::new(&req.directory);
         if !dir.exists() {
             return Err(format!("目录不存在: {}", req.directory));
@@ -268,11 +225,6 @@ impl EnhancedTerminalMCPServer {
         } else {
             Ok(format!("找到 {} 个文件:\n{}", files.len(), files.join("\n")))
         }
-    }
-    
-    #[tool(description = "获取当前系统信息")]
-    async fn get_system_info(&self) -> String {
-        format!("系统信息:\n{}", self.system_info.to_prompt_context())
     }
 }
 
@@ -298,7 +250,8 @@ impl EnhancedTerminalMCPServer {
     }
     
     async fn execute_in_process(&self, command: &str, timeout_duration: Duration) -> Result<String, String> {
-        let (shell, shell_arg) = match self.system_info.os.as_str() {
+        let os = std::env::consts::OS;
+        let (shell, shell_arg) = match os {
             "windows" => ("cmd", "/C"),
             _ => ("sh", "-c"),
         };
@@ -396,35 +349,35 @@ impl EnhancedTerminalMCPServer {
     }
 }
 
-#[tool(tool_box)]
-impl ServerHandler for EnhancedTerminalMCPServer {
+// #[tool(tool_box)]
+impl EnhancedTerminalMCPServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            name: "enhanced-terminal-mcp".to_string(),
-            version: "1.0.0".to_string(),
-            instructions: Some("增强的终端 MCP 服务器，支持命令执行、文件操作和系统信息查询".to_string()),
-            ..Default::default()
-        }
+            protocol_version: ProtocolVersion::default(),
+            capabilities: ServerCapabilities::default(),
+            server_info: Implementation {
+                name: "enhanced-terminal-mcp".to_string(),
+                version: "1.0.0".to_string(),
+        },
+        instructions: Some("增强的终端 MCP 服务器，支持命令执行、文件操作等功能".to_string()),
     }
 }
+}
 
-// AI Agent
+// AI Agent with Stream Support
 pub struct AIAgent {
     config: AIConfig,
     client: reqwest::Client,
-    system_info: SystemInfo,
     mcp_server: EnhancedTerminalMCPServer,
 }
 
 impl AIAgent {
     pub fn new(config: AIConfig) -> Self {
-        let system_info = SystemInfo::detect();
         let mcp_server = EnhancedTerminalMCPServer::new();
         
         Self {
             config,
             client: reqwest::Client::new(),
-            system_info,
             mcp_server,
         }
     }
@@ -434,11 +387,222 @@ impl AIAgent {
             return Err("API key not configured".to_string());
         }
 
-        // 构建增强的系统提示词
-        let system_prompt = format!(
+        let system_prompt = self.build_system_prompt();
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user_message.to_string(),
+            },
+        ];
+
+        let request = ChatRequest {
+            model: self.config.model.clone(),
+            messages,
+            max_tokens: self.config.max_tokens,
+            temperature: self.config.temperature,
+            stream: false,
+        };
+
+        let response = self.send_request(&request).await?;
+        
+        if let Some(choice) = response.choices.first() {
+            if let Some(message) = &choice.message {
+                let content = &message.content;
+                
+                // 检查是否需要执行MCP命令
+                if self.contains_mcp_commands(content) {
+                    return self.handle_mcp_commands(content).await;
+                }
+                
+                Ok(content.clone())
+            } else {
+                Err("No message content in response".to_string())
+            }
+        } else {
+            Err("No response from AI".to_string())
+        }
+    }
+
+    pub async fn chat_stream(&self, user_message: &str) -> Result<mpsc::Receiver<String>, String> {
+        if self.config.api_key.is_empty() {
+            return Err("API key not configured".to_string());
+        }
+
+        let system_prompt = self.build_system_prompt();
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user_message.to_string(),
+            },
+        ];
+
+        let request = ChatRequest {
+            model: self.config.model.clone(),
+            messages,
+            max_tokens: self.config.max_tokens,
+            temperature: self.config.temperature,
+            stream: true,
+        };
+
+        let (tx, rx) = mpsc::channel(100);
+        
+        let client = self.client.clone();
+        let config = self.config.clone();
+        
+        if let Err(e) = Self::handle_stream_response(client, config, request, tx).await {
+            eprintln!("Stream error: {}", e);
+        }
+
+        Ok(rx)
+    }
+    async fn handle_stream_response(
+        client: reqwest::Client,
+        config: AIConfig,
+        request: ChatRequest,
+        tx: mpsc::Sender<String>,
+    ) -> Result<(), String> {
+        let url = format!("{}/chat/completions", config.base_url);
+        
+        println!("[handle_stream_response] 请求 URL: {}", url);
+    
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", config.api_key))
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败: {}", e))?;
+    
+        println!("[handle_stream_response] 状态码: {}", response.status());
+    
+        if !response.status().is_success() {
+            let text = response.text().await.unwrap_or_else(|_: reqwest::Error| "<无法读取正文>".to_string());
+            println!("[handle_stream_response] 响应失败内容: {}", text);
+             return Err(format!("流读取失败"));
+        }
+    
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+    
+        println!("[handle_stream_response] 开始处理 stream");
+    
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    println!("[handle_stream_response] 流读取失败: {}", e);
+                    return Err(format!("流读取失败: {}", e));
+                }
+            };
+    
+            let chunk_str = String::from_utf8_lossy(&chunk);
+            println!("[handle_stream_response] 接收到原始 chunk: {}", chunk_str);
+    
+            buffer.push_str(&chunk_str);
+    
+            // 拆行处理
+            for line in chunk_str.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+    
+                // 打印每一行
+                println!("[handle_stream_response] 行数据: {}", line);
+    
+                // 处理 SSE 格式中的 data: 前缀
+                let json_part = if line.starts_with("data:") {
+                    &line[5..].trim()
+                } else {
+                    line
+                };
+    
+                if json_part == "[DONE]" {
+                    println!("[handle_stream_response] 接收到 [DONE]，结束流");
+                    break;
+                }
+    
+                match serde_json::from_str::<StreamChunk>(json_part) {
+                    Ok(chunk_data) => {
+                        if let Some(choice) = chunk_data.choices.first() {
+                            if let Some(delta) = &choice.delta {
+                                if let Some(content) = &delta.content {
+                                    println!("[handle_stream_response] Stream 内容片段: {}", content);
+                                    if tx.send(content.clone()).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                    }
+                    Err(e) => {
+                        println!("[handle_stream_response] JSON 解析失败: {}", e);
+                        println!("[handle_stream_response] 原始 JSON: {}", json_part);
+                    }
+                }
+            }
+        }
+    
+        println!("[handle_stream_response] 流处理完成");
+        Ok(())
+    }
+    
+
+    async fn send_request(&self, request: &ChatRequest) -> Result<ChatResponse, String> {
+        let url = format!("{}/chat/completions", self.config.base_url);
+        
+        let response = self.client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Content-Type", "application/json")
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        let status = response.status();
+        let response_text = response.text().await.map_err(|e| format!("Failed to get response text: {}", e))?;
+
+        if !status.is_success() {
+            match serde_json::from_str::<ErrorResponse>(&response_text) {
+                Ok(error_response) => {
+                    return Err(error_response.error.message);
+                }
+                Err(_) => {
+                    return Err(format!("API Error ({}): {}", status, response_text));
+                }
+            }
+        }
+
+        serde_json::from_str(&response_text)
+            .map_err(|e| format!("Failed to parse response: {}", e))
+    }
+
+    fn build_system_prompt(&self) -> String {
+        let os = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+        let current_dir = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+            .to_string_lossy()
+            .to_string();
+
+        format!(
             r#"你是一个智能终端助手，可以帮助用户执行各种终端命令和文件操作。
 
-{}
+当前系统信息：
+- 操作系统：{} ({})
+- 架构：{}
+- 当前目录：{}
 
 你拥有以下 MCP 工具功能：
 
@@ -465,8 +629,6 @@ impl AIAgent {
    - extension: 文件扩展名
    - recursive: 是否递归搜索子目录
 
-5. **get_system_info** - 获取系统信息
-
 命令执行指南：
 - 对于需要实时交互的命令（如 vim、top、htop 等），使用 execution_type="terminal"
 - 对于一次性命令（如 ls、cat、grep 等），使用 execution_type="process"
@@ -474,97 +636,23 @@ impl AIAgent {
 - 文件操作前请确认路径存在和权限充足
 - 回答时使用 Markdown 格式，让内容更易读
 
-使用示例：
-```json
-{{"command": "ls -la", "execution_type": "process", "timeout_seconds": 10}}
-```
-
 请根据用户需求选择合适的工具执行任务。"#,
-            self.system_info.to_prompt_context()
-        );
-
-        let messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt,
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: user_message.to_string(),
-            },
-        ];
-
-        let request = ChatRequest {
-            model: self.config.model.clone(),
-            messages,
-            max_tokens: self.config.max_tokens,
-            temperature: self.config.temperature,
-            stream: false,
-        };
-
-        let url = format!("{}/chat/completions", self.config.base_url);
-        println!("[RUST] Making request to: {}", url);
-
-        let response = self.client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {}", e))?;
-
-        let status = response.status();
-        let response_text = response.text().await.map_err(|e| format!("Failed to get response text: {}", e))?;
-
-        if !status.is_success() {
-            match serde_json::from_str::<ErrorResponse>(&response_text) {
-                Ok(error_response) => {
-                    return Err(error_response.error.message);
-                }
-                Err(_) => {
-                    return Err(format!("API Error ({}): {}", status, response_text));
-                }
-            }
-        }
-
-        let chat_response: ChatResponse = serde_json::from_str(&response_text)
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-        if let Some(choice) = chat_response.choices.first() {
-            let content = &choice.message.content;
-            
-            // 检查是否需要执行MCP命令
-            if self.contains_mcp_commands(content) {
-                return self.handle_mcp_commands(content).await;
-            }
-            
-            Ok(content.clone())
-        } else {
-            Err("No response from AI".to_string())
-        }
+            os, format!("{}-{}", os, arch), arch, current_dir
+        )
     }
 
     fn contains_mcp_commands(&self, content: &str) -> bool {
         content.contains("execute_command") || 
         content.contains("read_file") || 
         content.contains("write_file") || 
-        content.contains("find_files") || 
-        content.contains("get_system_info")
+        content.contains("find_files")
     }
 
     async fn handle_mcp_commands(&self, content: &str) -> Result<String, String> {
-        // 这里可以实现更复杂的MCP命令解析和执行逻辑
-        // 目前先简化处理
-        
         if content.contains("execute_command") {
             if let Some(command) = self.extract_command_from_content(content) {
                 return self.mcp_server.execute_in_process(&command, Duration::from_secs(30)).await;
             }
-        }
-        
-        if content.contains("get_system_info") {
-            return Ok(self.mcp_server.get_system_info().await);
         }
         
         // 如果没有找到具体的MCP命令，返回原始内容
@@ -614,6 +702,28 @@ pub async fn chat_with_ai(message: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn chat_with_ai_stream(app: tauri::AppHandle, message: String) -> Result<(), String> {
+    let agent_guard = AI_AGENT.lock().await;
+
+    if let Some(agent) = &*agent_guard {
+        let mut receiver = agent.chat_stream(&message).await?;
+        drop(agent_guard); // 释放锁
+        
+        // 异步任务中发送消息片段
+        tauri::async_runtime::spawn(async move {
+            while let Some(chunk) = receiver.recv().await {
+                let _ =  app.emit("ai-stream-chunk",  chunk.clone());
+            }
+            let _ = app.emit("ai-stream-end", "");
+        });
+
+        Ok(())
+    } else {
+        Err("AI Agent not configured. Please configure API key first.".to_string())
+    }
+}
+
+#[tauri::command]
 pub async fn get_ai_config() -> Result<Option<AIConfig>, String> {
     let agent_guard = AI_AGENT.lock().await;
     
@@ -622,9 +732,4 @@ pub async fn get_ai_config() -> Result<Option<AIConfig>, String> {
     } else {
         Ok(None)
     }
-}
-
-#[tauri::command]
-pub async fn get_system_info() -> Result<SystemInfo, String> {
-    Ok(SystemInfo::detect())
 }

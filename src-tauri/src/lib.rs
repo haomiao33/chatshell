@@ -15,7 +15,8 @@ use commands::{
 use ai::{
     configure_ai,
     chat_with_ai,
-    get_ai_config
+    get_ai_config,
+    chat_with_ai_stream
 };
 
 pub fn run() {
@@ -33,6 +34,7 @@ pub fn run() {
             // AI相关命令
             configure_ai,
             chat_with_ai,
+            chat_with_ai_stream,
             get_ai_config
         ])
         .run(tauri::generate_context!())

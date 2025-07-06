@@ -90,8 +90,8 @@ import { marked } from 'marked';
 import { markedHighlight } from 'marked-highlight';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github-dark.css';
-import DOMPurify from 'dompurify';
 import { Trash, Send, LoaderCircle } from 'lucide-vue-next';
+import { listen } from '@tauri-apps/api/event';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -105,6 +105,8 @@ const inputMessage = ref('');
 const isTyping = ref(false);
 const messagesContainer = ref<HTMLElement>();
 const inputRef = ref<HTMLTextAreaElement>();
+const currentAIMessage = ref('');
+
 
 // 配置 marked 支持代码高亮
 marked.use(markedHighlight({
@@ -166,53 +168,121 @@ const handleKeydown = (event: KeyboardEvent) => {
 //   }
 };
 
+// // 发送消息
+// const sendMessage = async () => {
+//   if (!inputMessage.value.trim() || isTyping.value) return;
+
+//   const userMessage: Message = {
+//     role: 'user',
+//     content: inputMessage.value.trim(),
+//     timestamp: Date.now()
+//   };
+
+//   messages.value.push(userMessage);
+//   const messageToSend = inputMessage.value.trim();
+//   inputMessage.value = '';
+//   autoResize();
+//   scrollToBottom();
+
+//   isTyping.value = true;
+
+//   try {
+//     // 调用后端 API 发送消息
+//     // const response = await invoke<string>('chat_with_ai', {
+//     //   message: messageToSend,
+//     //   history: messages.value.slice(-10) // 只发送最近 10 条消息作为上下文
+//     // });
+//     await invoke('chat_with_ai_stream', {
+//       message: messageToSend
+//     });
+
+//     // const aiMessage: Message = {
+//     //   role: 'assistant',
+//     //   content: response,
+//     //   timestamp: Date.now()
+//     // };
+
+//     // messages.value.push(aiMessage);
+//     scrollToBottom();
+
+//   } catch (error) {
+//     console.error('发送消息失败:', error);
+//     const errorMessage: Message = {
+//       role: 'assistant',
+//       content: `❌ 发送消息失败: ${error}`,
+//       timestamp: Date.now()
+//     };
+//     messages.value.push(errorMessage);
+//     scrollToBottom();
+//   } finally {
+//     isTyping.value = false;
+//   }
+// };
+
+
 // 发送消息
 const sendMessage = async () => {
-  if (!inputMessage.value.trim() || isTyping.value) return;
+  const content = inputMessage.value.trim();
+  if (!content || isTyping.value) return;
 
   const userMessage: Message = {
     role: 'user',
-    content: inputMessage.value.trim(),
+    content,
     timestamp: Date.now()
   };
 
   messages.value.push(userMessage);
-  const messageToSend = inputMessage.value.trim();
   inputMessage.value = '';
+  currentAIMessage.value = '';
   autoResize();
   scrollToBottom();
 
   isTyping.value = true;
 
   try {
-    // 调用后端 API 发送消息
-    const response = await invoke<string>('chat_with_ai', {
-      message: messageToSend,
-      history: messages.value.slice(-10) // 只发送最近 10 条消息作为上下文
+    await invoke('chat_with_ai_stream', {
+      message: content
     });
-
-    const aiMessage: Message = {
-      role: 'assistant',
-      content: response,
-      timestamp: Date.now()
-    };
-
-    messages.value.push(aiMessage);
-    scrollToBottom();
-
   } catch (error) {
     console.error('发送消息失败:', error);
-    const errorMessage: Message = {
+    messages.value.push({
       role: 'assistant',
-      content: `❌ 发送消息失败: ${error}`,
+      content: `❌ 发送失败：${error}`,
       timestamp: Date.now()
-    };
-    messages.value.push(errorMessage);
-    scrollToBottom();
-  } finally {
+    });
     isTyping.value = false;
   }
 };
+
+// 监听流式响应片段
+listen<string>('ai-stream-chunk', (event) => {
+  console.log('--- ai-stream-chunk', event);
+  if (!isTyping.value) {
+    currentAIMessage.value = '';
+    messages.value.push({
+      role: 'assistant',
+      content: '',
+      timestamp: Date.now()
+    });
+  }
+
+  currentAIMessage.value += event.payload;
+
+  const lastMessage = messages.value[messages.value.length - 1];
+  if (lastMessage?.role === 'assistant') {
+    lastMessage.content = currentAIMessage.value;
+  }
+
+  scrollToBottom();
+});
+
+// ✅ 监听流式结束
+listen('ai-stream-end', () => {
+  console.log('[ai-stream-end] AI 响应结束');
+  isTyping.value = false;
+});
+
+
 
 // 清空聊天
 const clearChat = () => {
@@ -223,6 +293,8 @@ const clearChat = () => {
 watch(messages, () => {
   scrollToBottom();
 }, { deep: true });
+
+
 
 // 组件挂载后聚焦输入框
 onMounted(() => {
