@@ -34,7 +34,7 @@ pub struct StreamResponse {
 #[derive(Clone, Serialize)]
 pub struct ChunkPayload {
     pub request_id: u32,
-    pub chunk: String,
+    pub chunk: bytes::Bytes,
 }
 
 #[derive(Clone, Serialize)]
@@ -103,27 +103,15 @@ impl HttpStreamClient {
                     while let Some(chunk) = stream.next().await {
                         match chunk {
                             Ok(bytes) => {
-                                println!("[stream_fetch] 收到 chunk: {:?}", bytes);
-                                match String::from_utf8(bytes.to_vec()) {
-                                    Ok(chunk_str) => {
-                                        println!("[stream_fetch] chunk 转为字符串: {}", chunk_str);
-                                        if let Err(e) = window.emit(event_name, ChunkPayload { request_id, chunk: chunk_str }) {
-                                            eprintln!("[stream_fetch] emit chunk 失败: {}", e);
-                                        }else{
-                                            println!("[stream_fetch] emit chunk 成功");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[stream_fetch] UTF-8 解码失败: {}", e);
-                                    }
+                                if let Err(e) = window.emit(event_name, ChunkPayload { request_id, chunk: bytes }) {
+                                    eprintln!("Failed to emit chunk: {}", e);
                                 }
                             }
-                            Err(e) => eprintln!("[stream_fetch] stream error: {}", e),
+                            Err(e) => eprintln!("Stream error: {}", e),
                         }
                     }
-        
                     if let Err(e) = window.emit(event_name, EndPayload { request_id, status }) {
-                        eprintln!("[stream_fetch] emit end 失败: {}", e);
+                        eprintln!("Failed to emit end: {}", e);
                     }
                 });
         
@@ -142,12 +130,12 @@ impl HttpStreamClient {
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = window.emit(event_name, ChunkPayload { 
                         request_id, 
-                        chunk: format!("[stream_fetch error] {}", error_msg),
+                        chunk: error_msg.into() 
                     }) {
-                        eprintln!("[stream_fetch] emit 错误 chunk 失败: {}", e);
+                        eprintln!("Failed to emit error chunk: {}", e);
                     }
                     if let Err(e) = window.emit(event_name, EndPayload { request_id, status: 0 }) {
-                        eprintln!("[stream_fetch] emit 错误 end 失败: {}", e);
+                        eprintln!("Failed to emit error end: {}", e);
                     }
                 });
         

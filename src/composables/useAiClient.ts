@@ -28,15 +28,19 @@ export function useAiClient() {
     unlistenStream = await listen<ChunkPayload | EndPayload>('stream-response', (event) => {
       const payload = event.payload;
       console.log('Received event:', event);
+      
+      // 修复：正确判断是 chunk 还是 end payload
       if ('chunk' in payload) {
         console.log('Received chunk:', payload.chunk);
         // 处理数据块
         const listener = streamListeners.get(payload.request_id);
         if (listener) {
-          // const chunk = new TextDecoder().decode(payload.chunk);
-          listener.onChunk(payload.chunk);
+          const chunk = new TextDecoder().decode(new Uint8Array(payload.chunk));
+          listener.onChunk(chunk);
         }
-      } else if ('DONE' in payload) {
+      } else if ('status' in payload) {
+        // 修复：应该检查 'status' 而不是 'DONE'
+        console.log('Received end with status:', payload.status);
         // 处理结束事件
         const listener = streamListeners.get(payload.request_id);
         if (listener) {
@@ -100,6 +104,8 @@ export function useAiClient() {
 
       // 注册回调
       streamListeners.set(response.request_id, callbacks);
+      
+      console.log('Stream fetch initiated, request_id:', response.request_id);
 
       return response;
     } catch (err) {
@@ -202,7 +208,7 @@ export function useAiClient() {
 
   return {
     tools: tools,
-    loading:loading,
+    loading: loading,
     error: error,
     getAvailableTools,
     executeTool,
